@@ -29,15 +29,46 @@ type AlertsMeta = {
   totalPages: number;
 };
 
+type AlertApiItem = {
+  id: string;
+  name: string;
+  url: string;
+  method: HttpMethod;
+  keywords?: string[];
+  intervalSeconds: number;
+  isActive: boolean;
+  lastCheckedAt?: string | null;
+  lastTriggeredAt?: string | null;
+  lastCheckResult?: LastCheckResult | null;
+  lastContentChanged?: boolean | null;
+  lastError?: string | null;
+};
+
+function toAlertItem(item: AlertApiItem): AlertItem {
+  return {
+    id: item.id,
+    name: item.name,
+    endpoint: item.url,
+    method: item.method,
+    keywords: item.keywords ?? [],
+    interval: item.intervalSeconds,
+    isActive: item.isActive,
+    workerRegistered: true,
+    lastCheckedAt: item.lastCheckedAt ?? null,
+    lastTriggeredAt: item.lastTriggeredAt ?? null,
+    lastCheckResult: item.lastCheckResult ?? null,
+    lastContentChanged: item.lastContentChanged ?? null,
+    lastError: item.lastError ?? null
+  };
+}
+
 const API_BASE = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 const PAGE_SIZE = 5;
 
-const unitLabel: Record<IntervalUnit | LastCheckResult, string> = {
-  seconds: "초",
-  minutes: "분",
+const resultLabel: Record<LastCheckResult, string> = {
   MATCH: "키워드 감지",
   NO_MATCH: "미감지",
-  ERROR: "에러"
+  ERROR: "오류"
 };
 
 const initialMeta: AlertsMeta = { total: 0, page: 1, pageSize: PAGE_SIZE, totalPages: 1 };
@@ -55,10 +86,10 @@ export default function Home() {
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
 
   const activeCount = useMemo(() => alerts.filter((alert) => alert.isActive).length, [alerts]);
-  const registeredCount = useMemo(() => alerts.filter((alert) => alert.workerRegistered).length, [alerts]);
 
   const resetForm = () => {
     setEditingId(null);
@@ -70,40 +101,30 @@ export default function Home() {
     setUnit("seconds");
   };
 
-  const loadAlerts = useCallback(async (targetPage = page) => {
-    setIsLoading(true);
-    try {
-      const response = await fetch(`${API_BASE}/alerts?page=${targetPage}&pageSize=${PAGE_SIZE}`);
-      if (!response.ok) throw new Error("알림 목록을 불러오지 못했습니다.");
-      const json = await response.json();
-      const data = Array.isArray(json.data) ? json.data : [];
-      const nextMeta: AlertsMeta = json.meta ?? initialMeta;
+  const loadAlerts = useCallback(
+    async (targetPage = page) => {
+      setIsLoading(true);
+      try {
+        const response = await fetch(`${API_BASE}/alerts?page=${targetPage}&pageSize=${PAGE_SIZE}`, {
+          cache: "no-store"
+        });
+        if (!response.ok) throw new Error("알림 목록을 불러오지 못했습니다.");
 
-      setAlerts(
-        data.map((item: any) => ({
-          id: item.id,
-          name: item.name,
-          endpoint: item.url,
-          method: item.method,
-          keywords: item.keywords ?? [],
-          interval: item.intervalSeconds,
-          isActive: item.isActive,
-          workerRegistered: true,
-          lastCheckedAt: item.lastCheckedAt ?? null,
-          lastTriggeredAt: item.lastTriggeredAt ?? null,
-          lastCheckResult: item.lastCheckResult ?? null,
-          lastContentChanged: item.lastContentChanged ?? null,
-          lastError: item.lastError ?? null
-        }))
-      );
-      setMeta(nextMeta);
-      setError("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "알림 목록 로드 중 오류가 발생했습니다.");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [page]);
+        const json = (await response.json()) as { data?: AlertApiItem[]; meta?: AlertsMeta };
+        const data = Array.isArray(json.data) ? json.data : [];
+        const nextMeta: AlertsMeta = json.meta ?? initialMeta;
+
+        setAlerts(data.map((item) => toAlertItem(item)));
+        setMeta(nextMeta);
+        setError("");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "알림 목록 로드 중 오류가 발생했습니다.");
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [page]
+  );
 
   useEffect(() => {
     void loadAlerts(page);
@@ -166,12 +187,37 @@ export default function Home() {
   };
 
   const onToggle = async (id: string) => {
+    const target = alerts.find((item) => item.id === id);
+    if (!target) return;
+
+    const nextActive = !target.isActive;
+    setAlerts((prev) => prev.map((alert) => (alert.id === id ? { ...alert, isActive: nextActive } : alert)));
+    setTogglingIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+
     try {
-      const response = await fetch(`${API_BASE}/alerts/${id}/toggle`, { method: "POST" });
+      const response = await fetch(`${API_BASE}/alerts/${id}/toggle`, {
+        method: "POST",
+        cache: "no-store"
+      });
       if (!response.ok) throw new Error("상태 토글에 실패했습니다.");
-      await loadAlerts(page);
+      const json = (await response.json()) as { data?: AlertApiItem };
+      if (json.data) {
+        const synced = toAlertItem(json.data);
+        setAlerts((prev) => prev.map((alert) => (alert.id === id ? synced : alert)));
+      }
     } catch (e) {
+      setAlerts((prev) => prev.map((alert) => (alert.id === id ? { ...alert, isActive: target.isActive } : alert)));
       setError(e instanceof Error ? e.message : "토글 중 오류가 발생했습니다.");
+    } finally {
+      setTogglingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   };
 
@@ -196,222 +242,227 @@ export default function Home() {
   };
 
   return (
-    <main className="mx-auto min-h-screen max-w-6xl px-5 py-10 md:px-8 md:py-14">
-      <section className="rounded-3xl border border-slate-100 bg-white/85 p-7 shadow-2xl shadow-cyan-100/50 backdrop-blur md:p-10">
-        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-ttutda-cyan">TTUTDA Dashboard</p>
-        <h1 className="mt-3 text-3xl font-semibold tracking-tight text-ttutda-ink md:text-4xl">
-          알림 설정 플로우를 바로 실행하는 대시보드
-        </h1>
-        <p className="mt-4 max-w-3xl text-sm leading-7 text-slate-700 md:text-base">
-          새 알림 추가부터 입력, 저장, 워커 등록, 활성화/비활성화 제어와 수정/삭제까지 한 화면에서 처리할 수 있습니다.
-        </p>
+    <main className="min-h-screen px-4 py-6 sm:px-6 lg:px-8">
+      <div className="mx-auto grid w-full max-w-[1400px] gap-6 lg:grid-cols-2">
+        <section className="rounded-3xl border border-slate-200 bg-slate-50 p-5 shadow-sm sm:p-8">
+          <div className="flex items-center gap-3 text-slate-900">
+            <IconWallet className="h-6 w-6 text-slate-700" />
+            <h2 className="text-3xl font-extrabold tracking-tight">Alert Setup</h2>
+          </div>
 
-        <div className="mt-7 grid gap-4 md:grid-cols-3">
-          <StatCard label="총 알림" value={`${alerts.length}개`} />
-          <StatCard label="활성화" value={`${activeCount}개`} />
-          <StatCard label="워커 등록" value={`${registeredCount}개`} />
-        </div>
-      </section>
-
-      <section className="mt-8 grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
-        <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-md">
-          <h2 className="text-lg font-semibold text-ttutda-ink">{editingId ? "알림 수정" : "새 알림 추가"}</h2>
-          <p className="mt-2 text-sm text-slate-600">알림 이름, URL/API endpoint, 감지 키워드, 관찰 주기를 입력하고 저장하세요.</p>
-
-          <form className="mt-6 space-y-4" onSubmit={onSubmit}>
-            <label className="block">
-              <span className="mb-1 block text-sm font-medium text-slate-800">알림 이름</span>
-              <input
-                className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
-                placeholder="예: 재입고 체크"
-                value={alertName}
-                onChange={(event) => setAlertName(event.target.value)}
-              />
-            </label>
-
-            <label className="block">
-              <span className="mb-1 block text-sm font-medium text-slate-800">관찰 대상 URL / API endpoint</span>
-              <input
-                className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
-                placeholder="https://api.example.com/items"
-                value={endpoint}
-                onChange={(event) => setEndpoint(event.target.value)}
-              />
-            </label>
-
-            <label className="block">
-              <span className="mb-1 block text-sm font-medium text-slate-800">HTTP Method</span>
-              <select
-                className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
-                value={method}
-                onChange={(event) => setMethod(event.target.value as HttpMethod)}
-              >
-                <option value="GET">GET</option>
-                <option value="POST">POST</option>
-              </select>
-            </label>
-
-            <label className="block">
-              <span className="mb-1 block text-sm font-medium text-slate-800">감지 키워드</span>
-              <input
-                className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
-                placeholder="재입고, In Stock (쉼표로 구분)"
-                value={keywordText}
-                onChange={(event) => setKeywordText(event.target.value)}
-              />
-            </label>
-
-            <div className="grid grid-cols-[2fr_1fr] gap-3">
-              <label className="block">
-                <span className="mb-1 block text-sm font-medium text-slate-800">관찰 주기</span>
-                <input
-                  type="number"
-                  min={1}
-                  className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
-                  value={interval}
-                  onChange={(event) => setInterval(event.target.value)}
-                />
-              </label>
-
-              <label className="block">
-                <span className="mb-1 block text-sm font-medium text-slate-800">단위</span>
-                <select
-                  className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
-                  value={unit}
-                  onChange={(event) => setUnit(event.target.value as IntervalUnit)}
-                >
-                  <option value="seconds">초</option>
-                  <option value="minutes">분</option>
-                </select>
-              </label>
+          <div className="mt-6 overflow-hidden rounded-3xl border border-slate-200 bg-white">
+            <div className="border-b border-slate-200 px-6 py-5">
+              <p className="text-sm text-slate-500">활성 알림</p>
+              <p className="mt-1 text-5xl font-black text-slate-900">{activeCount}</p>
             </div>
 
-            {error ? <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
+            <form className="space-y-4 border-b border-slate-200 px-6 py-5" onSubmit={onSubmit}>
+              <InputField label="알림 이름" value={alertName} onChange={setAlertName} placeholder="예: 재입고 알림" />
+              <InputField
+                label="관찰 대상 URL / API endpoint"
+                value={endpoint}
+                onChange={setEndpoint}
+                placeholder="https://api.example.com/items"
+              />
 
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="w-full rounded-xl bg-ttutda-cyan px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-600 disabled:cursor-not-allowed disabled:bg-slate-400"
-            >
-              {isSubmitting ? "저장 중..." : editingId ? "수정 저장" : "저장"}
-            </button>
-
-            {editingId ? (
-              <button
-                type="button"
-                onClick={resetForm}
-                className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-              >
-                수정 취소
-              </button>
-            ) : null}
-          </form>
-        </article>
-
-        <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-md">
-          <h2 className="text-lg font-semibold text-ttutda-ink">알림 목록</h2>
-          <p className="mt-2 text-sm text-slate-600">저장된 알림은 기본 활성화(ON) 상태로 등록되며 토글 버튼으로 상태를 제어할 수 있습니다.</p>
-
-          <div className="mt-5 space-y-4">
-            {isLoading ? <p className="text-sm text-slate-500">목록을 불러오는 중입니다...</p> : null}
-            {alerts.map((alert) => (
-              <div key={alert.id} className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">
-                      {alert.isActive ? "활성화 ON" : "비활성화 OFF"}
-                    </span>
-                    <span className="rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700">
-                      {alert.workerRegistered ? "워커 등록됨" : "등록 대기"}
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition ${
-                      alert.isActive ? "bg-emerald-500 hover:bg-emerald-600" : "bg-slate-500 hover:bg-slate-600"
-                    }`}
-                    onClick={() => onToggle(alert.id)}
-                    aria-label={`${alert.name} 상태 토글`}
-                  >
-                    {alert.isActive ? "활성화 ON" : "비활성화 OFF"}
-                  </button>
-                </div>
-
-                <p className="mt-3 text-base font-semibold text-slate-900">{alert.name}</p>
-                <p className="mt-1 break-all text-sm font-medium text-slate-800">{alert.endpoint}</p>
-
-                <div className="mt-2 grid gap-1 text-sm text-slate-600">
-                  <p>요청: {alert.method}</p>
-                  <p>키워드: {alert.keywords.join(", ")}</p>
-                  <p>주기: {alert.interval}초</p>
-                  <p>최근 체크: {formatDate(alert.lastCheckedAt)}</p>
-                  <p>최근 감지: {formatDate(alert.lastTriggeredAt)}</p>
-                  <p>
-                    내용 변경:{" "}
-                    {alert.lastContentChanged === null ? "초기 수집/정보 없음" : alert.lastContentChanged ? "변경됨" : "변경 없음"}
-                  </p>
-                  <p>
-                    최근 결과: {alert.lastCheckResult ? unitLabel[alert.lastCheckResult] : "대기 중"}
-                  </p>
-                  {alert.lastError ? <p className="text-rose-600">에러: {alert.lastError}</p> : null}
-                </div>
-
-                <div className="mt-3 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onEdit(alert)}
-                    className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
-                  >
-                    수정
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onDelete(alert.id)}
-                    className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100"
-                  >
-                    삭제
-                  </button>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <SelectField<HttpMethod> label="HTTP Method" value={method} onChange={setMethod} options={["GET", "POST"]} />
+                <div className="grid grid-cols-[2fr_1fr] gap-2">
+                  <label className="block text-sm font-medium text-slate-800">
+                    관찰 주기
+                    <input
+                      type="number"
+                      min={1}
+                      className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-slate-500"
+                      value={interval}
+                      onChange={(event) => setInterval(event.target.value)}
+                    />
+                  </label>
+                  <SelectField<IntervalUnit> label="단위" value={unit} onChange={setUnit} options={["seconds", "minutes"]} labels={{ seconds: "초", minutes: "분" }} />
                 </div>
               </div>
-            ))}
 
-            {!isLoading && alerts.length === 0 ? <p className="text-sm text-slate-500">등록된 알림이 없습니다.</p> : null}
+              <InputField label="감지 키워드" value={keywordText} onChange={setKeywordText} placeholder="재입고, In Stock" />
+
+              {error ? <p className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="rounded-xl bg-[#0d1117] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1b2430] disabled:cursor-not-allowed disabled:bg-slate-400"
+                >
+                  {isSubmitting ? "저장 중..." : editingId ? "수정 저장" : "알림 저장"}
+                </button>
+                {editingId ? (
+                  <button
+                    type="button"
+                    onClick={resetForm}
+                    className="rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                  >
+                    수정 취소
+                  </button>
+                ) : null}
+              </div>
+            </form>
+
+          </div>
+        </section>
+
+        <section className="rounded-3xl border border-slate-200 bg-slate-50 p-5 shadow-sm sm:p-8">
+          <div className="flex items-center gap-3 text-slate-900">
+            <IconActivity className="h-6 w-6 text-slate-700" />
+            <h2 className="text-3xl font-extrabold tracking-tight">Recent Alerts</h2>
           </div>
 
-          <div className="mt-4 flex items-center justify-between">
-            <button
-              type="button"
-              disabled={page <= 1}
-              onClick={() => setPage((prev) => Math.max(1, prev - 1))}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300"
-            >
-              이전
-            </button>
-            <p className="text-xs text-slate-500">
-              {meta.page} / {meta.totalPages} 페이지 ({meta.total}개)
-            </p>
-            <button
-              type="button"
-              disabled={page >= meta.totalPages}
-              onClick={() => setPage((prev) => Math.min(meta.totalPages, prev + 1))}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300"
-            >
-              다음
-            </button>
+          <div className="mt-6 overflow-hidden rounded-3xl border border-slate-200 bg-white">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
+              <p className="text-3xl font-bold text-slate-900">
+                Recent Activity <span className="text-xl font-medium text-slate-500">({meta.total} alerts)</span>
+              </p>
+              <p className="text-lg font-medium text-slate-500">Page {meta.page}</p>
+            </div>
+
+            <div className="space-y-3 px-4 py-4 sm:px-6 sm:py-5">
+              {isLoading ? <p className="text-sm text-slate-500">목록을 불러오는 중입니다...</p> : null}
+              {!isLoading && alerts.length === 0 ? <p className="text-sm text-slate-500">등록된 알림이 없습니다.</p> : null}
+
+              {alerts.map((alert) => (
+                <article key={alert.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 rounded-xl border border-slate-300 bg-white p-2">
+                        <IconCard className="h-5 w-5 text-slate-700" />
+                      </div>
+                      <div>
+                      <p className="text-xl font-bold text-slate-900">{alert.name}</p>
+                      <p className="mt-1 break-all text-sm text-slate-600">{alert.endpoint}</p>
+                      <p className="mt-2 text-sm text-slate-500">
+                        {alert.method} • {alert.interval}초 • {alert.keywords.join(", ")}
+                      </p>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <p className={`text-xl font-bold ${alert.isActive ? "text-emerald-600" : "text-rose-500"}`}>
+                        {alert.isActive ? "ON" : "OFF"}
+                      </p>
+                      <p className="text-xs text-slate-500">{alert.lastCheckResult ? resultLabel[alert.lastCheckResult] : "대기"}</p>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-600">
+                    <span className="rounded-full border border-slate-300 bg-white px-2.5 py-1">최근 체크 {formatDate(alert.lastCheckedAt)}</span>
+                    <span className="rounded-full border border-slate-300 bg-white px-2.5 py-1">최근 감지 {formatDate(alert.lastTriggeredAt)}</span>
+                    <span className="rounded-full border border-slate-300 bg-white px-2.5 py-1">
+                      변경 {alert.lastContentChanged === null ? "-" : alert.lastContentChanged ? "있음" : "없음"}
+                    </span>
+                    {alert.lastError ? <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-rose-700">에러 {alert.lastError}</span> : null}
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={togglingIds.has(alert.id)}
+                      onClick={() => onToggle(alert.id)}
+                      className="rounded-lg bg-[#111827] px-3 py-2 text-xs font-semibold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-500"
+                    >
+                      {togglingIds.has(alert.id) ? "반영 중..." : alert.isActive ? "OFF로 전환" : "ON으로 전환"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onEdit(alert)}
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
+                    >
+                      수정
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDelete(alert.id)}
+                      className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100"
+                    >
+                      삭제
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <div className="border-t border-slate-200 p-4 sm:p-5">
+              <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
+                <button
+                  type="button"
+                  disabled={page <= 1}
+                  onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                  className="rounded-md border border-slate-300 bg-white px-3 py-1.5 disabled:cursor-not-allowed disabled:text-slate-300"
+                >
+                  이전
+                </button>
+                <span>
+                  {meta.page} / {meta.totalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={page >= meta.totalPages}
+                  onClick={() => setPage((prev) => Math.min(meta.totalPages, prev + 1))}
+                  className="rounded-md border border-slate-300 bg-white px-3 py-1.5 disabled:cursor-not-allowed disabled:text-slate-300"
+                >
+                  다음
+                </button>
+              </div>
+              <button className="w-full rounded-2xl bg-gradient-to-r from-[#0b0f17] via-[#131b2b] to-[#0b0f17] px-4 py-3 text-sm font-bold text-white">
+                View All Alerts
+              </button>
+            </div>
           </div>
-        </article>
-      </section>
+        </section>
+      </div>
     </main>
   );
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
+function InputField({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (next: string) => void; placeholder: string }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white/90 p-4">
-      <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">{label}</p>
-      <p className="mt-1 text-2xl font-semibold text-ttutda-ink">{value}</p>
-    </div>
+    <label className="block text-sm font-medium text-slate-800">
+      {label}
+      <input
+        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-slate-500"
+        value={value}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
+function SelectField<T extends string>({
+  label,
+  value,
+  onChange,
+  options,
+  labels
+}: {
+  label: string;
+  value: T;
+  onChange: (next: T) => void;
+  options: T[];
+  labels?: Partial<Record<T, string>>;
+}) {
+  return (
+    <label className="block text-sm font-medium text-slate-800">
+      {label}
+      <select
+        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-slate-500"
+        value={value}
+        onChange={(event) => onChange(event.target.value as T)}
+      >
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {labels?.[option] ?? option}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -419,5 +470,33 @@ function formatDate(value: string | null): string {
   if (!value) return "-";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "-";
-  return date.toLocaleString("ko-KR");
+  return date.toLocaleString("ko-KR", { hour12: false });
+}
+
+function IconWallet({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={className} aria-hidden="true">
+      <rect x="3.5" y="6" width="17" height="12" rx="2.5" />
+      <path d="M16.5 12h4" />
+      <circle cx="16.2" cy="12" r="0.8" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function IconActivity({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={className} aria-hidden="true">
+      <rect x="3.5" y="5.5" width="17" height="13" rx="2.5" />
+      <path d="M8 12h8" />
+    </svg>
+  );
+}
+
+function IconCard({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className={className} aria-hidden="true">
+      <rect x="3.5" y="6" width="17" height="12" rx="2.5" />
+      <path d="M3.5 10h17" />
+    </svg>
+  );
 }
