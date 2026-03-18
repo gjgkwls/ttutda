@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-start: #eef6ff;
+  --bg-mid: #f9ffef;
+  --bg-end: #e8fbff;
+}
+
+body {
+  margin: 0;
+  font-family: "Pretendard", "SUIT", "Noto Sans KR", "Spoqa Han Sans Neo", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  color: #102a43;
+  background:
+    radial-gradient(circle at 10% 0%, #ffffff 0%, transparent 35%),
+    radial-gradient(circle at 95% 20%, #d2f1ff 0%, transparent 30%),
+    linear-gradient(140deg, var(--bg-start) 0%, var(--bg-mid) 45%, var(--bg-end) 100%);
+}
